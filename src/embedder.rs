@@ -1,3 +1,4 @@
+use crate::health::Health;
 use anyhow::{anyhow, Context, Result};
 use ort::environment::Environment;
 use ort::session::{builder::GraphOptimizationLevel, Session};
@@ -13,6 +14,7 @@ pub struct Embedder {
     pub dim: usize,
     has_token_type: bool,
     output_name: String,
+    pub health: Health,
 }
 
 pub struct Embedded {
@@ -21,12 +23,33 @@ pub struct Embedded {
     pub tokens: Vec<usize>,
 }
 
+/// What the HTTP layer needs from the model, so handlers can be tested without loading one.
+pub trait Embed: Send + Sync {
+    fn embed(&self, texts: &[String]) -> Result<Embedded>;
+    fn health_check(&self) -> Result<(), String>;
+    fn consecutive_failures(&self) -> u64;
+}
+
+impl Embed for Embedder {
+    fn embed(&self, texts: &[String]) -> Result<Embedded> {
+        Embedder::embed(self, texts)
+    }
+
+    fn health_check(&self) -> Result<(), String> {
+        Embedder::health_check(self)
+    }
+
+    fn consecutive_failures(&self) -> u64 {
+        self.health.consecutive_failures()
+    }
+}
+
 fn oe<E: std::fmt::Display>(e: E) -> anyhow::Error {
     anyhow!("{e}")
 }
 
 impl Embedder {
-    pub fn load(model_dir: &Path, threads: usize, dim: usize, max_len: usize) -> Result<Self> {
+    pub fn load(model_dir: &Path, threads: usize, dim: usize, max_len: usize, max_failures: u64) -> Result<Self> {
         let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
             .map_err(|e| anyhow!("load tokenizer: {e}"))?;
         tokenizer
@@ -55,10 +78,44 @@ impl Embedder {
             .first()
             .map(|o| o.name().to_string())
             .ok_or_else(|| anyhow!("model has no outputs"))?;
-        Ok(Self { _env: env, session: Mutex::new(session), tokenizer, dim, has_token_type, output_name })
+        Ok(Self { _env: env, session: Mutex::new(session), tokenizer, dim, has_token_type, output_name, health: Health::new(max_failures) })
+    }
+
+    /// Runs two real inferences before the service starts listening: a short text (checks the output
+    /// dimension and normalization) and a text long enough to reach `max_tokens` (checks the model really
+    /// supports that sequence length).
+    pub fn self_check(&self, max_tokens: usize) -> Result<()> {
+        let short = self.embed(&["自检".to_string()]).context("short-text inference")?;
+        let v = short.vectors.first().ok_or_else(|| anyhow!("no vector returned"))?;
+        if v.len() != self.dim || v.iter().any(|x| !x.is_finite()) {
+            return Err(anyhow!("bad vector: len {} (DIM={}), all finite: {}", v.len(), self.dim, v.iter().all(|x| x.is_finite())));
+        }
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if (norm - 1.0).abs() > 1e-3 {
+            return Err(anyhow!("vector is not unit length after normalization: {norm}"));
+        }
+        let long = "测".repeat(max_tokens.saturating_mul(2).max(2));
+        self.embed(&[long])
+            .with_context(|| format!("inference at MAX_TOKENS={max_tokens} (does the model support that many positions?)"))?;
+        Ok(())
+    }
+
+    /// Whether a panic during inference poisoned the model lock (the service cannot recover from that).
+    pub fn session_poisoned(&self) -> bool {
+        self.session.is_poisoned()
+    }
+
+    pub fn health_check(&self) -> Result<(), String> {
+        self.health.check(self.session_poisoned())
     }
 
     pub fn embed(&self, texts: &[String]) -> Result<Embedded> {
+        let r = self.embed_inner(texts);
+        self.health.record(r.is_ok());
+        r
+    }
+
+    fn embed_inner(&self, texts: &[String]) -> Result<Embedded> {
         if texts.is_empty() {
             return Ok(Embedded { vectors: vec![], tokens: vec![] });
         }

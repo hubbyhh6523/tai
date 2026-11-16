@@ -27,7 +27,7 @@ impl Metrics {
     }
 
     /// Prometheus text exposition format.
-    pub fn render(&self, c: &crate::cache::CacheStats) -> String {
+    pub fn render(&self, c: &crate::cache::CacheStats, healthy: bool, consecutive_failures: u64) -> String {
         let mut s = String::new();
         let mut line = |name: &str, help: &str, kind: &str, v: u64| {
             s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {v}\n"));
@@ -43,6 +43,8 @@ impl Metrics {
         line("embed_texts_total", "texts received", "counter", self.texts.load(Relaxed));
         line("embed_cache_hits_total", "texts served from cache", "counter", self.cache_hits.load(Relaxed));
         line("embed_cache_misses_total", "texts needing inference", "counter", self.cache_misses.load(Relaxed));
+        line("embed_healthy", "1 when the model is serving normally, 0 otherwise", "gauge", u64::from(healthy));
+        line("embed_consecutive_inference_failures", "inference failures since the last success", "gauge", consecutive_failures);
         line("embed_cache_entries", "entries currently cached", "gauge", c.entries as u64);
         line("embed_cache_bytes", "estimated bytes held by the cache", "gauge", c.bytes as u64);
         line("embed_cache_max_bytes", "cache byte budget (0 = disabled)", "gauge", c.max_bytes as u64);
@@ -74,11 +76,13 @@ mod tests {
         let m = Metrics::default();
         m.cache_hits.fetch_add(3, Relaxed);
         let st = crate::cache::CacheStats { entries: 2, bytes: 4096, max_bytes: 8192, max_entries: 10, evictions: 5, expired: 1 };
-        let out = m.render(&st);
+        let out = m.render(&st, true, 2);
         assert!(out.contains("embed_cache_hits_total 3"));
         assert!(out.contains("embed_cache_entries 2"));
         assert!(out.contains("embed_cache_evictions_total 5"));
         assert!(out.contains("embed_cache_max_bytes 8192"));
+        assert!(out.contains("embed_healthy 1"));
+        assert!(out.contains("embed_consecutive_inference_failures 2"));
         assert!(out.contains("# TYPE embed_responses_server_error_total counter"));
     }
 }

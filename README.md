@@ -7,7 +7,7 @@
 | 路径 | 说明 |
 |---|---|
 | `POST /v1/embeddings`（也支持 `/embeddings`） | `input` 可以是字符串或数组；`dimensions` 与模型维度不一致时返回 400；支持 `encoding_format: base64` |
-| `GET /health` | 存活检查 |
+| `GET /health` | 可用性检查：模型可用返回 200；模型锁被 panic 毒化，或连续推理失败达到 `HEALTH_MAX_FAILS` 次，返回 503 并带上原因 |
 | `GET /metrics` | Prometheus 文本格式指标 |
 | `GET /v1/models` | 返回当前模型名 |
 
@@ -21,7 +21,7 @@ cargo run --release                  # 默认监听 0.0.0.0:8090
 python3 scripts/smoke.py             # 冒烟测试，需要服务已在运行
 ```
 
-单元测试不需要模型：`cargo test`。首次构建会从网络下载 ONNX Runtime（`ort` 的 `download-binaries`）。
+`cargo test` 不需要模型：共 27 个测试，其中 10 个在本地回环上启动真实的 HTTP 服务、用假模型验证鉴权、参数校验、缓存和健康检查。首次构建会从网络下载 ONNX Runtime（`ort` 的 `download-binaries`）。
 
 ## 环境变量
 
@@ -39,12 +39,17 @@ python3 scripts/smoke.py             # 冒烟测试，需要服务已在运行
 | `CACHE_MAX_MB` | 64 | 缓存字节预算，0 表示关闭 |
 | `CACHE_MAX_ENTRIES` | 200000 | 缓存条目上限 |
 | `CACHE_TTL_SECS` | 0 | 缓存过期秒数，0 表示不过期 |
+| `HEALTH_MAX_FAILS` | 3 | 连续推理失败多少次后 `/health` 返回 503，0 表示关闭这项检查 |
+
+## 启动自检
+
+监听端口之前，服务会先做两次真实推理：一条短文本（核对输出维度和归一化），一条长到足以达到 `MAX_TOKENS` 的文本（核对模型确实支持这么长的序列）。`DIM` 或 `MAX_TOKENS` 配错时进程会带着原因以非零状态退出，而不是等到第一个请求才报错。
 
 ## 缓存与指标
 
 缓存键是文本的 128 位 blake3 哈希，按字节预算淘汰最久未用的条目，可选 TTL。批量请求里的重复文本只推理一次。
 
-重点关注这几个指标：`embed_responses_server_error_total`（调用方拿不到向量的次数）、`embed_inference_errors_total`、`embed_cache_hits_total` 与 `embed_cache_misses_total`、`embed_cache_evictions_total`。
+重点关注这几个指标：`embed_responses_server_error_total`（调用方拿不到向量的次数）、`embed_inference_errors_total`、`embed_cache_hits_total` 与 `embed_cache_misses_total`、`embed_cache_evictions_total`，以及 `embed_healthy`（为 0 即服务不可用）。
 
 ## 部署
 
@@ -55,13 +60,14 @@ python3 scripts/smoke.py             # 冒烟测试，需要服务已在运行
 - 模型会话受一把互斥锁保护，推理是串行的。在一台 4 vCPU 的沙箱里、缓存未命中时吞吐约 190 条/秒。这是合成负载下的测量值，不代表你的真实流量。
 - `ort` 固定在预发布版 `2.0.0-rc.15`，升级时接口可能变化。
 - Dockerfile 和 `docker compose` 流程尚未在容器里实际验证（编写环境没有 Docker），详见 `deploy/README.md` 的验证状态表。
+- `/health` 返回 503 时需要外部编排器重启它：`docker compose` 的 `restart: unless-stopped` 只在进程退出时重启，不会重启 unhealthy 的容器。503 的路径在 HTTP 层测试里用假模型触发过，没有用真实模型触发过。
 - CI 会用 `cargo clippy -- -D warnings` 强制不允许新的 clippy 警告；`cargo fmt --check` 目前不通过，CI 没有检查格式。
 - 暂无许可证。
 
 ## 目录
 
 ```
-src/        服务代码（main、embedder、cache、metrics）
+src/        服务代码（main、embedder、cache、metrics、health）
 deploy/     docker-compose、网关配置、模型下载与 admin 初始化脚本
 scripts/    冒烟测试、缓存策略测试、压测脚本
 ```

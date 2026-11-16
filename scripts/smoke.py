@@ -68,4 +68,9 @@ check("client errors counted", m3b["embed_responses_client_error_total"] - m3a["
 check("no server errors", m3b["embed_responses_server_error_total"] == 0 and m3b["embed_inference_errors_total"] == 0)
 check("cache bounded", m3b["embed_cache_bytes"] <= m3b["embed_cache_max_bytes"])
 
+with urllib.request.urlopen(BASE + "/health", timeout=10) as x:
+    hb = json.load(x)
+check("health endpoint ok", x.status == 200 and hb.get("status") == "ok" and hb.get("dimensions") == DIM, str(hb))
+check("healthy gauge", m3b["embed_healthy"] == 1 and m3b["embed_consecutive_inference_failures"] == 0)
+
 sys.exit(0 if ok else 1)
