@@ -16,7 +16,7 @@
 ## 快速开始
 
 ```bash
-./deploy/fetch-model.sh model        # 下载模型并校验 SHA-256，约 95 MB
+bash deploy/fetch-model.sh model      # 下载模型并校验 SHA-256，约 95 MB
 cargo run --release                  # 默认监听 0.0.0.0:8090
 python3 scripts/smoke.py             # 冒烟测试，需要服务已在运行
 ```
