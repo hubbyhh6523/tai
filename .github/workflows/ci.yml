@@ -25,8 +25,8 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
       - name: Unit tests (no model needed)
         run: cargo test --locked
-      - name: Clippy (warnings are reported, not enforced yet)
-        run: cargo clippy --locked --all-targets
+      - name: Clippy (warnings fail the build)
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   scripts-and-deploy:
     runs-on: ubuntu-latest

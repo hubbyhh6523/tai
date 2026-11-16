@@ -162,14 +162,14 @@ async fn embeddings_inner(app: Arc<App>, headers: HeaderMap, body: JsonBody) -> 
         Ok(Json(r)) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_request_error", format!("bad request body: {e}")),
     };
-    if let Some(d) = req.dimensions {
-        if d != app.cfg.dim {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!("model produces {} dimensions, requested {d}; set `dimensions` to {} (or sendDimensions: false)", app.cfg.dim, app.cfg.dim),
-            );
-        }
+    if let Some(d) = req.dimensions
+        && d != app.cfg.dim
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!("model produces {} dimensions, requested {d}; set `dimensions` to {} (or sendDimensions: false)", app.cfg.dim, app.cfg.dim),
+        );
     }
     let b64 = match req.encoding_format.as_deref() {
         None | Some("float") => false,

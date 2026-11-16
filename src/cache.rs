@@ -70,10 +70,8 @@ impl EmbedCache {
     pub fn get(&self, text: &str) -> Option<Entry> {
         let mut g = self.inner.as_ref()?.lock().ok()?;
         let key = key_of(text);
-        let stale = match g.map.peek(&key) {
-            None => return None,
-            Some(s) => self.ttl.is_some_and(|t| s.at.elapsed() > t),
-        };
+        let slot = g.map.peek(&key)?;
+        let stale = self.ttl.is_some_and(|t| slot.at.elapsed() > t);
         if stale {
             if let Some(s) = g.map.pop(&key) {
                 g.bytes -= s.bytes;

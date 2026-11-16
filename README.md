@@ -55,7 +55,7 @@ python3 scripts/smoke.py             # 冒烟测试，需要服务已在运行
 - 模型会话受一把互斥锁保护，推理是串行的。在一台 4 vCPU 的沙箱里、缓存未命中时吞吐约 190 条/秒。这是合成负载下的测量值，不代表你的真实流量。
 - `ort` 固定在预发布版 `2.0.0-rc.15`，升级时接口可能变化。
 - Dockerfile 和 `docker compose` 流程尚未在容器里实际验证（编写环境没有 Docker），详见 `deploy/README.md` 的验证状态表。
-- `cargo clippy` 目前有 1 条警告，`cargo fmt --check` 也不通过，所以 CI 只报告、不强制。
+- CI 会用 `cargo clippy -- -D warnings` 强制不允许新的 clippy 警告；`cargo fmt --check` 目前不通过，CI 没有检查格式。
 - 暂无许可证。
 
 ## 目录
