@@ -1,0 +1,16 @@
+[package]
+name = "embed-svc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8"
+base64 = "0.23.1"
+blake3 = "1.8.7"
+lru = "0.19.0"
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-31"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal"] }

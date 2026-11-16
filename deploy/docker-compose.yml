@@ -1,0 +1,76 @@
+# embed-svc + memory-core with embedding enabled.
+# Do NOT run the official start-memory-core.sh / start-all.sh next to this file: they regenerate
+# tdai-gateway.yaml with `embedding.provider: none` and replace the tdai-memory-core container.
+# Hub / Proxy can still be started with the official scripts; they join the same network.
+name: tdai-embed
+
+services:
+  embed-svc:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: tdai/embed-svc:local
+    container_name: tdai-embed-svc
+    restart: unless-stopped
+    environment:
+      PORT: "8090"
+      MODEL_DIR: /model
+      MODEL_NAME: bge-small-zh-v1.5
+      DIM: "512"
+      THREADS: ${EMBED_THREADS:-4}
+      MAX_BATCH: "256"
+      MAX_CHARS: "5000"
+      API_KEY: ${EMBED_API_KEY:?set EMBED_API_KEY in .env}
+      CACHE_MAX_MB: ${CACHE_MAX_MB:-64}
+      CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-200000}
+      CACHE_TTL_SECS: ${CACHE_TTL_SECS:-0}
+    volumes:
+      - ${EMBED_MODEL_DIR:-./models/bge-small-zh-v1.5}:/model:ro
+    ports:
+      - "127.0.0.1:${EMBED_PORT:-8090}:8090" # loopback only: /metrics and manual checks
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8090 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    mem_limit: 1g
+    networks:
+      tdai-memory-stack:
+        aliases: [embed-svc]
+
+  memory-core:
+    image: ${MEMORY_CORE_IMAGE:-agentmemory/memory-core:latest}
+    container_name: tdai-memory-core
+    restart: unless-stopped
+    depends_on:
+      embed-svc:
+        condition: service_healthy
+    ports:
+      - "${MEMORY_CORE_PORT:-8420}:8420"
+    volumes:
+      - memory-core-data:/data/tdai-memory
+      - ./tdai-gateway.yaml:/data/config/tdai-gateway.yaml:ro
+    environment:
+      TDAI_GATEWAY_PORT: "8420"
+      TDAI_GATEWAY_HOST: 0.0.0.0
+      # Keep empty while the official Proxy is used (known incompatibility, see official start-memory-core.sh).
+      TDAI_GATEWAY_API_KEY: ${MEMORY_CORE_GATEWAY_API_KEY:-}
+      TDAI_DATA_DIR: /data/tdai-memory
+      STORE_MODE: sqlite
+      MEMORY_LLM_BASE_URL: ${MEMORY_LLM_BASE_URL:?set MEMORY_LLM_BASE_URL in .env}
+      MEMORY_LLM_API_KEY: ${MEMORY_LLM_API_KEY:?set MEMORY_LLM_API_KEY in .env}
+      MEMORY_LLM_MODEL: ${MEMORY_LLM_MODEL:?set MEMORY_LLM_MODEL in .env}
+      MEMORY_PROMPT_MODE: ${MEMORY_PROMPT_MODE:-code}
+      EMBED_API_KEY: ${EMBED_API_KEY:?set EMBED_API_KEY in .env}
+    networks:
+      tdai-memory-stack:
+        aliases: [memory-core]
+
+networks:
+  tdai-memory-stack:
+    name: tdai-memory-stack # same name the official scripts use
+
+volumes:
+  memory-core-data:
+    name: ${MEMORY_CORE_VOLUME:-tdai-memory-core-data}
