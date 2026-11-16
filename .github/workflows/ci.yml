@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust (edition 2024 needs 1.85 or newer)
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Unit tests (no model needed)
+        run: cargo test --locked
+      - name: Clippy (warnings are reported, not enforced yet)
+        run: cargo clippy --locked --all-targets
+
+  scripts-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          for f in deploy/fetch-model.sh deploy/init-admin.sh scripts/bench.sh; do bash -n "$f"; done
+      - name: Python syntax
+        run: python3 -m py_compile scripts/smoke.py scripts/smoke_cache.py scripts/load.py
+      - name: docker-compose.yml renders
+        env:
+          EMBED_API_KEY: ci
+          MEMORY_LLM_BASE_URL: http://llm.invalid/v1
+          MEMORY_LLM_API_KEY: ci
+          MEMORY_LLM_MODEL: ci
+        run: docker compose -f deploy/docker-compose.yml config -q
