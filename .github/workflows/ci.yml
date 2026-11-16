@@ -28,13 +28,40 @@ jobs:
       - name: Clippy (warnings fail the build)
         run: cargo clippy --locked --all-targets -- -D warnings
 
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust (edition 2024 needs 1.85 or newer)
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-release-${{ runner.os }}-
+      - name: Restore cached model
+        uses: actions/cache@v4
+        with:
+          path: model
+          key: model-${{ hashFiles('deploy/fetch-model.sh') }}
+      - name: Fetch model (SHA-256 is re-verified even when cached)
+        run: bash deploy/fetch-model.sh model
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Smoke tests against the real model
+        run: bash scripts/ci-smoke.sh
+
   scripts-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Shell syntax
         run: |
-          for f in deploy/fetch-model.sh deploy/init-admin.sh scripts/bench.sh; do bash -n "$f"; done
+          for f in deploy/fetch-model.sh deploy/init-admin.sh scripts/bench.sh scripts/ci-smoke.sh; do bash -n "$f"; done
       - name: Python syntax
         run: python3 -m py_compile scripts/smoke.py scripts/smoke_cache.py scripts/load.py
       - name: docker-compose.yml renders

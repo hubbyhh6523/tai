@@ -23,6 +23,8 @@ python3 scripts/smoke.py             # 冒烟测试，需要服务已在运行
 
 `cargo test` 不需要模型：共 27 个测试，其中 10 个在本地回环上启动真实的 HTTP 服务、用假模型验证鉴权、参数校验、缓存和健康检查。首次构建会从网络下载 ONNX Runtime（`ort` 的 `download-binaries`）。
 
+CI 里还有一个 `smoke` 任务：下载模型（按 `fetch-model.sh` 的内容缓存，每次都重新校验 SHA-256），用真实模型启动发布版二进制，运行 `scripts/ci-smoke.sh`：冒烟测试一次，缓存淘汰和 TTL 测试各一次，三次使用不同的服务配置。
+
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
