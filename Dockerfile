@@ -1,6 +1,7 @@
 # Not built/tested in the authoring sandbox (no Docker there).
 FROM rust:1-slim-trixie AS build
 WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 RUN cargo build --release
