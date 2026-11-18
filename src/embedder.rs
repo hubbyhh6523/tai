@@ -1,15 +1,16 @@
 use crate::health::Health;
+use crate::session_pool::SessionPool;
 use anyhow::{anyhow, Context, Result};
 use ort::environment::Environment;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::Session;
 use ort::value::Tensor;
 use std::path::Path;
-use std::sync::Mutex;
+use std::time::Duration;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 pub struct Embedder {
     _env: Environment,
-    session: Mutex<Session>,
+    pool: SessionPool,
     tokenizer: Tokenizer,
     pub dim: usize,
     has_token_type: bool,
@@ -49,11 +50,22 @@ fn oe<E: std::fmt::Display>(e: E) -> anyhow::Error {
 }
 
 impl Embedder {
-    pub fn load(model_dir: &Path, threads: usize, dim: usize, max_len: usize, max_failures: u64) -> Result<Self> {
+    pub fn load(
+        model_dir: &Path,
+        pool_size: usize,
+        threads_per_session: usize,
+        queue_timeout: Option<Duration>,
+        dim: usize,
+        max_len: usize,
+        max_failures: u64,
+    ) -> Result<Self> {
         let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
             .map_err(|e| anyhow!("load tokenizer: {e}"))?;
         tokenizer
-            .with_truncation(Some(TruncationParams { max_length: max_len, ..Default::default() }))
+            .with_truncation(Some(TruncationParams {
+                max_length: max_len,
+                ..Default::default()
+            }))
             .map_err(|e| anyhow!("truncation: {e}"))?;
         tokenizer.with_padding(Some(PaddingParams {
             strategy: PaddingStrategy::BatchLongest,
@@ -63,22 +75,36 @@ impl Embedder {
         }));
 
         let env = ort::init().with_name("embed-svc").build().map_err(oe)?;
-        let session = Session::builder(&env)
-            .map_err(oe)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(oe)?
-            .with_intra_threads(threads)
-            .map_err(oe)?
-            .commit_from_file(model_dir.join("model.onnx"))
-            .map_err(oe)
-            .context("load model.onnx")?;
+        let pool = SessionPool::new(
+            &env,
+            &model_dir.join("model.onnx"),
+            pool_size,
+            threads_per_session,
+            queue_timeout,
+        )
+        .map_err(oe)
+        .context("load model.onnx")?;
+
+        let probe = pool.acquire().map_err(oe)?;
+        let session = probe.session().map_err(oe)?;
         let has_token_type = session.inputs().iter().any(|i| i.name() == "token_type_ids");
         let output_name = session
             .outputs()
             .first()
             .map(|o| o.name().to_string())
             .ok_or_else(|| anyhow!("model has no outputs"))?;
-        Ok(Self { _env: env, session: Mutex::new(session), tokenizer, dim, has_token_type, output_name, health: Health::new(max_failures) })
+        drop(session);
+        drop(probe);
+
+        Ok(Self {
+            _env: env,
+            pool,
+            tokenizer,
+            dim,
+            has_token_type,
+            output_name,
+            health: Health::new(max_failures),
+        })
     }
 
     /// Runs two real inferences before the service starts listening: a short text (checks the output
@@ -88,21 +114,30 @@ impl Embedder {
         let short = self.embed(&["自检".to_string()]).context("short-text inference")?;
         let v = short.vectors.first().ok_or_else(|| anyhow!("no vector returned"))?;
         if v.len() != self.dim || v.iter().any(|x| !x.is_finite()) {
-            return Err(anyhow!("bad vector: len {} (DIM={}), all finite: {}", v.len(), self.dim, v.iter().all(|x| x.is_finite())));
+            return Err(anyhow!(
+                "bad vector: len {} (DIM={}), all finite: {}",
+                v.len(),
+                self.dim,
+                v.iter().all(|x| x.is_finite())
+            ));
         }
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if (norm - 1.0).abs() > 1e-3 {
-            return Err(anyhow!("vector is not unit length after normalization: {norm}"));
+            return Err(anyhow!(
+                "vector is not unit length after normalization: {norm}"
+            ));
         }
         let long = "测".repeat(max_tokens.saturating_mul(2).max(2));
         self.embed(&[long])
-            .with_context(|| format!("inference at MAX_TOKENS={max_tokens} (does the model support that many positions?)"))?;
+            .with_context(|| format!(
+                "inference at MAX_TOKENS={max_tokens} (does the model support that many positions?)"
+            ))?;
         Ok(())
     }
 
-    /// Whether a panic during inference poisoned the model lock (the service cannot recover from that).
+    /// Whether a panic during inference poisoned any pooled session lock.
     pub fn session_poisoned(&self) -> bool {
-        self.session.is_poisoned()
+        self.pool.session_poisoned()
     }
 
     pub fn health_check(&self) -> Result<(), String> {
@@ -117,8 +152,12 @@ impl Embedder {
 
     fn embed_inner(&self, texts: &[String]) -> Result<Embedded> {
         if texts.is_empty() {
-            return Ok(Embedded { vectors: vec![], tokens: vec![] });
+            return Ok(Embedded {
+                vectors: vec![],
+                tokens: vec![],
+            });
         }
+
         let encs = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
@@ -129,33 +168,69 @@ impl Embedder {
         let mut mask = Vec::with_capacity(b * s);
         let mut types = Vec::with_capacity(b * s);
         let mut tokens = Vec::with_capacity(b);
+
         for e in &encs {
             ids.extend(e.get_ids().iter().map(|&x| x as i64));
             mask.extend(e.get_attention_mask().iter().map(|&x| x as i64));
             types.extend(e.get_type_ids().iter().map(|&x| x as i64));
-            tokens.push(e.get_attention_mask().iter().filter(|&&m| m == 1).count());
+            tokens.push(
+                e.get_attention_mask()
+                    .iter()
+                    .filter(|&&m| m == 1)
+                    .count(),
+            );
         }
 
-        let mut session = self.session.lock().map_err(|_| anyhow!("session lock poisoned"))?;
+        let pooled = self.pool.acquire().map_err(oe)?;
+        let mut session = pooled.session().map_err(oe)?;
+
         let ids_t = Tensor::from_array(([b, s], ids)).map_err(oe)?;
         let mask_t = Tensor::from_array(([b, s], mask)).map_err(oe)?;
         let outputs = if self.has_token_type {
             let types_t = Tensor::from_array(([b, s], types)).map_err(oe)?;
-            session.run(ort::inputs!["input_ids" => ids_t, "attention_mask" => mask_t, "token_type_ids" => types_t]).map_err(oe)?
+            session
+                .run(ort::inputs![
+                    "input_ids" => ids_t,
+                    "attention_mask" => mask_t,
+                    "token_type_ids" => types_t
+                ])
+                .map_err(oe)?
         } else {
-            session.run(ort::inputs!["input_ids" => ids_t, "attention_mask" => mask_t]).map_err(oe)?
+            session
+                .run(ort::inputs![
+                    "input_ids" => ids_t,
+                    "attention_mask" => mask_t
+                ])
+                .map_err(oe)?
         };
-        let (shape, data) = outputs[self.output_name.as_str()].try_extract_tensor::<f32>().map_err(oe)?;
+
+        let (shape, data) = outputs[self.output_name.as_str()]
+            .try_extract_tensor::<f32>()
+            .map_err(oe)?;
         let vectors = cls_pool_normalize(data, shape, b, s, self.dim)?;
+
         Ok(Embedded { vectors, tokens })
     }
 }
 
 /// CLS pooling (token 0 of each sequence) followed by L2 normalization.
-pub fn cls_pool_normalize(data: &[f32], shape: &[i64], b: usize, s: usize, dim: usize) -> Result<Vec<Vec<f32>>> {
-    if shape.len() != 3 || shape[0] as usize != b || shape[1] as usize != s || shape[2] as usize != dim {
-        return Err(anyhow!("unexpected output shape {shape:?}, want [{b}, {s}, {dim}]"));
+pub fn cls_pool_normalize(
+    data: &[f32],
+    shape: &[i64],
+    b: usize,
+    s: usize,
+    dim: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if shape.len() != 3
+        || shape[0] as usize != b
+        || shape[1] as usize != s
+        || shape[2] as usize != dim
+    {
+        return Err(anyhow!(
+            "unexpected output shape {shape:?}, want [{b}, {s}, {dim}]"
+        ));
     }
+
     let mut out = Vec::with_capacity(b);
     for i in 0..b {
         let start = i * s * dim;
