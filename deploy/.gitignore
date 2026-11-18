@@ -1,3 +1,8 @@
 .env
 .admin-key
 models/
+proxy-config.yaml
+
+# local-only test helpers, not part of the documented deploy
+docker-compose.verify.yml
+mock-llm.py

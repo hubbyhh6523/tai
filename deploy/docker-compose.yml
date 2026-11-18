@@ -1,7 +1,6 @@
-# embed-svc + memory-core with embedding enabled.
+# embed-svc + memory-core + memory-hub + memory-proxy with embedding enabled.
 # Do NOT run the official start-memory-core.sh / start-all.sh next to this file: they regenerate
 # tdai-gateway.yaml with `embedding.provider: none` and replace the tdai-memory-core container.
-# Hub / Proxy can still be started with the official scripts; they join the same network.
 name: tdai-embed
 
 services:
@@ -9,6 +8,9 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        # crates.io mirror for the Rust build, e.g. https://rsproxy.cn (empty = upstream)
+        CARGO_REGISTRY_MIRROR: ${CARGO_REGISTRY_MIRROR:-}
     image: tdai/embed-svc:local
     container_name: tdai-embed-svc
     restart: unless-stopped
@@ -67,6 +69,67 @@ services:
       tdai-memory-stack:
         aliases: [memory-core]
 
+  memory-hub:
+    image: ${MEMORY_HUB_IMAGE:-agentmemory/memory-hub:latest}
+    container_name: tdai-memory-hub
+    restart: unless-stopped
+    depends_on:
+      memory-core:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${PANEL_PORT:-8125}:8125" # loopback only: admin panel
+      - "127.0.0.1:${KNOWLEDGE_PORT:-8424}:8424" # loopback only: wiki / code-graph
+    volumes:
+      - memory-hub-data:/data/knowledge
+      # Hub rejects "local" (the upstream doc's value) on /v3/meta/* with 401 invalid_user_key.
+      # It needs a real Core user key, which only exists after init-admin.sh. Reading it from
+      # the file keeps the key out of the environment and out of this file.
+      - ./.admin-key:/run/tdai/admin-key:ro
+    # Wrap the stock entrypoint so the key is read at start time instead of build time.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'REMOTE_INSTANCE_KEY="$$(cat /run/tdai/admin-key)"; export REMOTE_INSTANCE_KEY; exec /usr/local/bin/start-combined.sh'
+    environment:
+      PANEL_PORT: "8125"
+      KNOWLEDGE_PORT: "8424"
+      # Hub talks to Core over the compose network alias, never host.docker.internal.
+      REMOTE_INSTANCE_URL: http://memory-core:8420
+      KNOWLEDGE_PUBLIC_BASE_URL: http://127.0.0.1:${KNOWLEDGE_PORT:-8424}/v3
+      LLM_MODE: custom
+      LLM_BASE_URL: ${MEMORY_LLM_BASE_URL:?set MEMORY_LLM_BASE_URL in .env}
+      LLM_API_KEY: ${MEMORY_LLM_API_KEY:?set MEMORY_LLM_API_KEY in .env}
+      LLM_MODEL: ${MEMORY_LLM_MODEL:?set MEMORY_LLM_MODEL in .env}
+    networks:
+      tdai-memory-stack:
+        aliases: [memory-hub]
+
+  # LLM request proxy (:8096): auth -> sessionInit -> memory injection -> upstream.
+  # No build section: this repo does not vendor the Proxy sources, and
+  # agentmemory/memory-proxy:latest is not pullable from CN registries. Build it once from
+  # the upstream MemoryProxy/ directory and tag it as ${MEMORY_PROXY_IMAGE} (default below).
+  memory-proxy:
+    image: ${MEMORY_PROXY_IMAGE:-memory-proxy:local}
+    container_name: tdai-proxy
+    restart: unless-stopped
+    depends_on:
+      memory-core:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${PROXY_PORT:-8096}:8096" # loopback only: LLM proxy
+    volumes:
+      - memory-proxy-data:/data
+      # Mounted 644, not 600: the proxy image runs as uid 10001 and cannot read a 600 file.
+      - ./proxy-config.yaml:/data/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8096/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      tdai-memory-stack:
+        aliases: [memory-proxy]
+
 networks:
   tdai-memory-stack:
     name: tdai-memory-stack # same name the official scripts use
@@ -74,3 +137,7 @@ networks:
 volumes:
   memory-core-data:
     name: ${MEMORY_CORE_VOLUME:-tdai-memory-core-data}
+  memory-hub-data:
+    name: ${MEMORY_HUB_VOLUME:-tdai-panel-data}
+  memory-proxy-data:
+    name: ${MEMORY_PROXY_VOLUME:-tdai-proxy-data}

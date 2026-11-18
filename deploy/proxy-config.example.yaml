@@ -1,0 +1,73 @@
+# Memory Proxy configuration template (mounted to /data/config.yaml).
+#   cp proxy-config.example.yaml proxy-config.yaml
+#   chmod 644 proxy-config.yaml        # 600 breaks it: the image runs as uid 10001
+# Fill in upstream.url / upstream.apiKey, then: docker compose up -d memory-proxy
+#
+# IMPORTANT: the proxy does NOT expand ${VAR} in this file — placeholders are taken
+# literally (upstream.url resolves to the literal string, requests then fail with 502).
+# Write real values here, or point apiKey at a file via TDAI_PROXY_UPSTREAM_API_KEY_FILE.
+#
+# Credentials for Core: "local" is enough everywhere below, including auth.serviceToken.
+# The admin key is only needed by the Hub panel, not by the proxy. Do not put it here.
+# Never commit proxy-config.yaml: it is gitignored.
+
+server:
+  host: 0.0.0.0
+  port: 8096
+  forwardTimeoutMs: 3600000 # 1h, same as upstream default
+
+upstream:
+  # OpenAI-compatible endpoint that actually serves chat/completions.
+  url: "http://REPLACE_ME/v1"
+  # Empty string = pass the caller's own Authorization header through unchanged.
+  apiKey: "REPLACE_ME"
+
+# User auth against Core. WITHOUT this block auth stays disabled, the resolved userId is
+# empty, and memory injection silently does nothing on every request.
+auth:
+  enabled: true
+  url: "http://memory-core:8420"
+  timeoutMs: 5000
+
+# Session binding. Must be enabled together with a client-sent conversation id, otherwise
+# sessionInit never runs and injection is skipped (see README "客户端必需请求头").
+sessionInit:
+  enabled: true
+  injectAgentContext: true
+  injectTaskContext: true
+  # Trust x-team-id / x-agent-id / x-task-id instead of asking the LLM to fill a form.
+  headerAutoSelect:
+    enabled: true
+    teamHeader: "x-team-id"
+    agentHeader: "x-agent-id"
+    taskHeader: "x-task-id"
+    onMismatch: "bypass"
+
+tdai:
+  enabled: true
+  endpoint: "http://memory-core:8420"
+  apiKey: "local"
+  serviceId: "default"
+  memory:
+    enabled: true
+    inject: true
+    writeL0: true
+    recallL1: true
+    injectL2L3: true
+    l1Limit: 5
+    l2Limit: 3
+    timeoutMs: 5000
+
+skill:
+  endpoint: "http://memory-core:8420"
+  serviceToken: "local"
+  serviceId: "context-proxy"
+  timeoutMs: 1500
+
+# Off by default upstream; without it the injectors list is inert.
+injection:
+  enabled: true
+  injectors: ["skill", "knowledge", "tdai-memory"]
+
+log:
+  level: info

@@ -1,10 +1,16 @@
 # Not built/tested in the authoring sandbox (no Docker there).
 FROM rust:1-slim-trixie AS build
+# Optional crates.io mirror (sparse index at <mirror>/index/), e.g. https://rsproxy.cn
+ARG CARGO_REGISTRY_MIRROR=
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends libstdc++-14-dev && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
-RUN cargo build --release
+RUN if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
+      printf '[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "sparse+%s/index/"\n[net]\nretry = 3\n' \
+        "$CARGO_REGISTRY_MIRROR" > "${CARGO_HOME:-/usr/local/cargo}/config.toml"; \
+    fi \
+ && cargo build --release
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
