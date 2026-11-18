@@ -124,3 +124,129 @@ mod tests {
         assert!(!pool.session_poisoned());
     }
 }
+
+#[cfg(test)]
+mod regression {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::{mpsc, Barrier};
+    use std::thread;
+    const WAIT: Duration = Duration::from_secs(5);
+    fn pool(n: usize, timeout: Duration) -> Arc<SessionPool> {
+        Arc::new(SessionPool { inner: Arc::new(PoolInner {
+            slots: vec![], idle: Mutex::new((0..n).collect()),
+            available: Condvar::new(), queue_timeout: Some(timeout),
+        }) })
+    }
+    fn returned(p: &SessionPool, n: usize) {
+        let idle = p.inner.idle.lock().unwrap();
+        assert_eq!(idle.len(), n);
+        assert_eq!(idle.iter().copied().collect::<HashSet<_>>(), (0..n).collect());
+    }
+    #[test]
+    fn empty_pool_times_out() {
+        let timeout = Duration::from_millis(20);
+        let p = pool(0, timeout);
+        let start = Instant::now();
+        assert!(p.acquire().is_err());
+        assert!(start.elapsed() >= timeout);
+    }
+    #[test]
+    fn exhausted_pool_times_out_then_reuses_returned_slot() {
+        let timeout = Duration::from_millis(30);
+        let p = pool(2, timeout);
+        let a = p.acquire().unwrap();
+        let b = p.acquire().unwrap();
+        assert_ne!(a.index, b.index);
+        let start = Instant::now();
+        assert!(p.acquire().is_err());
+        assert!(start.elapsed() >= timeout);
+        let index = a.index;
+        drop(a);
+        let c = p.acquire().unwrap();
+        assert_eq!(c.index, index);
+        drop(c);
+        drop(b);
+        returned(&p, 2);
+    }
+    #[test]
+    fn returning_slot_unblocks_borrower() {
+        let p = pool(1, WAIT);
+        let held = p.acquire().unwrap();
+        let index = held.index;
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let other = Arc::clone(&p);
+        let worker = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let guard = other.acquire().unwrap();
+            tx.send(guard.index).unwrap();
+        });
+        ready_rx.recv_timeout(WAIT).unwrap();
+        let before = rx.recv_timeout(Duration::from_millis(30));
+        drop(held);
+        let after = rx.recv_timeout(WAIT);
+        worker.join().unwrap();
+        assert!(matches!(before, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert_eq!(after.unwrap(), index);
+        returned(&p, 1);
+    }
+    #[test]
+    fn early_error_returns_slot() {
+        fn fail(p: &SessionPool) -> Result<()> {
+            let _guard = p.acquire()?;
+            Err(anyhow!("injected failure"))
+        }
+        let p = pool(1, WAIT);
+        assert!(fail(&p).is_err());
+        returned(&p, 1);
+        drop(p.acquire().unwrap());
+        returned(&p, 1);
+    }
+    #[test]
+    fn panic_unwinding_returns_slot() {
+        let p = pool(1, WAIT);
+        let other = Arc::clone(&p);
+        let worker = thread::spawn(move || {
+            let _guard = other.acquire().unwrap();
+            panic!("injected panic after checkout");
+        });
+        assert!(worker.join().is_err());
+        returned(&p, 1);
+        drop(p.acquire().unwrap());
+        returned(&p, 1);
+    }
+    #[test]
+    fn concurrent_borrowers_never_share_slots_or_exceed_capacity() {
+        const SIZE: usize = 2;
+        const WORKERS: usize = 8;
+        let p = pool(SIZE, WAIT);
+        let start = Arc::new(Barrier::new(WORKERS));
+        let active = Arc::new(Mutex::new(HashSet::new()));
+        let workers: Vec<_> = (0..WORKERS).map(|_| {
+            let p = Arc::clone(&p);
+            let start = Arc::clone(&start);
+            let active = Arc::clone(&active);
+            thread::spawn(move || {
+                start.wait();
+                for _ in 0..100 {
+                    let guard = p.acquire().unwrap();
+                    let index = guard.index;
+                    {
+                        let mut active = active.lock().unwrap();
+                        assert!(index < SIZE);
+                        assert!(active.insert(index), "slot {index} borrowed twice");
+                        assert!(active.len() <= SIZE);
+                    }
+                    thread::yield_now();
+                    assert!(active.lock().unwrap().remove(&index));
+                    drop(guard);
+                }
+            })
+        }).collect();
+        let results: Vec<_> = workers.into_iter().map(|w| w.join()).collect();
+        assert!(results.iter().all(|r| r.is_ok()));
+        assert!(active.lock().unwrap().is_empty());
+        returned(&p, SIZE);
+    }
+}
