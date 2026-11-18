@@ -2,6 +2,7 @@ mod cache;
 mod embedder;
 mod health;
 mod metrics;
+mod session_pool;
 
 use axum::{
     extract::State,
@@ -25,6 +26,8 @@ struct Config {
     model_name: String,
     dim: usize,
     threads: usize,
+    pool_size: usize,
+    queue_timeout_ms: u64,
     max_batch: usize,
     max_chars: usize,
     max_tokens: usize,
@@ -47,6 +50,8 @@ impl Config {
             model_name: env_or("MODEL_NAME", "bge-small-zh-v1.5".to_string()),
             dim: env_or("DIM", 512),
             threads: env_or("THREADS", 4),
+            pool_size: env_or("SESSION_POOL_SIZE", 2),
+            queue_timeout_ms: env_or("EMBED_QUEUE_TIMEOUT_MS", 5000),
             max_batch: env_or("MAX_BATCH", 256),
             max_chars: env_or("MAX_CHARS", 5000),
             max_tokens: env_or("MAX_TOKENS", 512),
@@ -263,10 +268,22 @@ fn build_router(app: Arc<App>) -> Router {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env();
-    let embedder = Arc::new(Embedder::load(&cfg.model_dir, cfg.threads, cfg.dim, cfg.max_tokens, cfg.health_max_failures)?);
+    anyhow::ensure!(cfg.pool_size > 0, "SESSION_POOL_SIZE must be greater than zero");
+    anyhow::ensure!(cfg.threads > 0, "THREADS must be greater than zero");
+    let queue_timeout = (cfg.queue_timeout_ms > 0)
+        .then(|| std::time::Duration::from_millis(cfg.queue_timeout_ms));
+    let embedder = Arc::new(Embedder::load(
+        &cfg.model_dir,
+        cfg.pool_size,
+        cfg.threads,
+        queue_timeout,
+        cfg.dim,
+        cfg.max_tokens,
+        cfg.health_max_failures,
+    )?);
     let t0 = Instant::now();
     embedder.self_check(cfg.max_tokens).context("startup self-check failed")?;
-    eprintln!("self-check ok: dim={} max_tokens={} in {} ms", cfg.dim, cfg.max_tokens, t0.elapsed().as_millis());
+    eprintln!("self-check ok: dim={} max_tokens={} pool_size={} threads_per_session={} queue_timeout_ms={} in {} ms", cfg.dim, cfg.max_tokens, cfg.pool_size, cfg.threads, cfg.queue_timeout_ms, t0.elapsed().as_millis());
     let port = cfg.port;
     let ttl = (cfg.cache_ttl_secs > 0).then(|| std::time::Duration::from_secs(cfg.cache_ttl_secs));
     let cache = EmbedCache::new((cfg.cache_max_mb * 1024.0 * 1024.0) as usize, cfg.cache_max_entries, ttl);
@@ -331,6 +348,8 @@ mod tests {
             model_name: "fake-model".into(),
             dim: 4,
             threads: 1,
+            pool_size: 2,
+            queue_timeout_ms: 5000,
             max_batch: 3,
             max_chars: 8,
             max_tokens: 512,
