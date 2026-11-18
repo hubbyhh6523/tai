@@ -2,7 +2,6 @@ use crate::health::Health;
 use crate::session_pool::SessionPool;
 use anyhow::{anyhow, Context, Result};
 use ort::environment::Environment;
-use ort::session::Session;
 use ort::value::Tensor;
 use std::path::Path;
 use std::time::Duration;
