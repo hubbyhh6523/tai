@@ -1,3 +1,4 @@
+mod batcher;
 mod cache;
 mod embedder;
 mod health;
@@ -13,6 +14,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::Engine;
+use batcher::Batcher;
 use cache::{EmbedCache, Entry};
 use embedder::{Embed, Embedder};
 use metrics::Metrics;
@@ -40,6 +42,12 @@ struct Config {
     max_tokens_per_run: usize,
     max_body_mb: usize,
     rate_limit_per_min: u64,
+    /// Cross-request batching window. 0 disables batching (direct runs).
+    batch_window_ms: u64,
+    /// Flush a collecting batch once it holds this many texts.
+    batch_max_texts: usize,
+    /// Flush a collecting batch once it holds this many requests.
+    batch_max_requests: usize,
     cache_max_mb: f64,
     cache_max_entries: usize,
     cache_ttl_secs: u64,
@@ -117,6 +125,9 @@ impl Config {
             max_tokens_per_run: env_or("MAX_TOKENS_PER_RUN", 8192),
             max_body_mb: env_or("MAX_BODY_MB", 4),
             rate_limit_per_min: env_or("RATE_LIMIT_PER_MIN", 0),
+            batch_window_ms: env_or("BATCH_WINDOW_MS", 0),
+            batch_max_texts: env_or("BATCH_MAX_TEXTS", 32),
+            batch_max_requests: env_or("BATCH_MAX_REQUESTS", 8),
             cache_max_mb: env_or("CACHE_MAX_MB", 64.0),
             cache_max_entries: env_or("CACHE_MAX_ENTRIES", 200_000),
             cache_ttl_secs: env_or("CACHE_TTL_SECS", 0),
@@ -170,8 +181,9 @@ impl RateLimiter {
 struct App {
     cfg: Config,
     embedder: Arc<dyn Embed>,
+    batcher: Batcher,
     cache: EmbedCache,
-    metrics: Metrics,
+    metrics: Arc<Metrics>,
     rate_limiter: RateLimiter,
 }
 
@@ -295,28 +307,20 @@ fn embed_with_cache(app: &App, texts: &[String]) -> anyhow::Result<Vec<Entry>> {
         pending.push((i, j));
     }
     if !uniq_texts.is_empty() {
-        let t0 = Instant::now();
-        let emb = app.embedder.embed(&uniq_texts).map_err(|e| {
-            app.metrics.inference_errors.fetch_add(1, Relaxed);
+        // Only the cache misses go through the batcher: a request whose
+        // texts are all cached never waits for a batching window. The
+        // batcher merges this request's misses with other concurrent
+        // requests' misses into one model call and returns entries in
+        // `uniq_texts` order; inference counters are recorded inside
+        // the batcher, per model call.
+        let owned: Vec<String> = uniq_texts.iter().map(|t| t.to_string()).collect();
+        let entries: Vec<Entry> = app.batcher.submit(owned).map_err(|e| {
             eprintln!(
                 "ERROR inference failed (batch of {}): {e:#}",
                 uniq_texts.len()
             );
             e
         })?;
-        app.metrics.inference_batches.fetch_add(1, Relaxed);
-        app.metrics
-            .inference_ms
-            .fetch_add(t0.elapsed().as_millis() as u64, Relaxed);
-        let entries: Vec<Entry> = emb
-            .vectors
-            .into_iter()
-            .zip(emb.tokens)
-            .map(|(v, tokens)| Entry {
-                vec: Arc::new(v),
-                tokens,
-            })
-            .collect();
         for (t, e) in uniq_texts.iter().zip(&entries) {
             app.cache.put(t, e.clone());
         }
@@ -578,7 +582,7 @@ async fn main() -> anyhow::Result<()> {
         .self_check(cfg.max_tokens)
         .context("startup self-check failed")?;
     eprintln!(
-        "self-check ok: dim={} max_tokens={} max_tokens_per_run={} pool_size={} threads_per_session={} cpus={} queue_timeout_ms={} bind={} in {} ms",
+        "self-check ok: dim={} max_tokens={} max_tokens_per_run={} pool_size={} threads_per_session={} cpus={} queue_timeout_ms={} batch_window_ms={} batch_max_texts={} batch_max_requests={} bind={} in {} ms",
         cfg.dim,
         cfg.max_tokens,
         cfg.max_tokens_per_run,
@@ -586,6 +590,9 @@ async fn main() -> anyhow::Result<()> {
         cfg.threads,
         cpus,
         cfg.queue_timeout_ms,
+        cfg.batch_window_ms,
+        cfg.batch_max_texts,
+        cfg.batch_max_requests,
         cfg.bind_addr,
         t0.elapsed().as_millis()
     );
@@ -599,11 +606,20 @@ async fn main() -> anyhow::Result<()> {
         ttl,
     );
     let rate_limit = cfg.rate_limit_per_min;
+    let metrics = Arc::new(Metrics::default());
+    let batcher = Batcher::new(
+        embedder.clone(),
+        metrics.clone(),
+        Duration::from_millis(cfg.batch_window_ms),
+        cfg.batch_max_texts,
+        cfg.batch_max_requests,
+    );
     let app = Arc::new(App {
         cfg,
         embedder,
+        batcher,
         cache,
-        metrics: Metrics::default(),
+        metrics,
         rate_limiter: RateLimiter::new(rate_limit),
     });
     if exit_on_unhealthy {
@@ -706,6 +722,9 @@ mod tests {
             max_tokens_per_run: 8192,
             max_body_mb: 4,
             rate_limit_per_min: 0,
+            batch_window_ms: 0,
+            batch_max_texts: 32,
+            batch_max_requests: 8,
             cache_max_mb: 1.0,
             cache_max_entries: 100,
             cache_ttl_secs: 0,
@@ -784,11 +803,20 @@ mod tests {
         );
         let api_key = cfg.api_key.clone();
         let rate_limit = cfg.rate_limit_per_min;
+        let metrics = Arc::new(Metrics::default());
+        let batcher = Batcher::new(
+            fake.clone(),
+            metrics.clone(),
+            Duration::from_millis(cfg.batch_window_ms),
+            cfg.batch_max_texts,
+            cfg.batch_max_requests,
+        );
         let app = Arc::new(App {
             cfg,
             embedder: fake.clone(),
+            batcher,
             cache,
-            metrics: Metrics::default(),
+            metrics,
             rate_limiter: RateLimiter::new(rate_limit),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1078,6 +1106,65 @@ mod tests {
         assert_eq!(h.metric("embed_responses_server_error_total").await, 1);
         assert_eq!(h.metric("embed_inference_errors_total").await, 1);
         assert_eq!(h.metric("embed_requests_total").await, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_requests_merge_and_each_gets_its_own_vector() {
+        let mut c = cfg();
+        c.batch_window_ms = 50;
+        let h = Arc::new(start(c).await);
+        // Eight distinct lengths so the fake vector (first element =
+        // char count) identifies which text each response belongs to.
+        let texts = [
+            "a", "bb", "ccc", "dddd", "eeeee", "ffffff", "ggggggg", "hhhhhhhh",
+        ];
+        let mut handles = Vec::new();
+        for (i, t) in texts.iter().enumerate() {
+            let h = Arc::clone(&h);
+            let body = format!(r#"{{"input":["{t}"]}}"#);
+            handles.push(tokio::spawn(async move {
+                let r = h.post(&body).await;
+                (i, r)
+            }));
+        }
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await.unwrap());
+        }
+        for (i, r) in results {
+            assert_eq!(r.0, 200, "{}", r.1);
+            let v = json_of(&r)["data"][0]["embedding"][0].as_f64().unwrap();
+            assert_eq!(
+                v,
+                (i + 1) as f64,
+                "request {i} must get its own text's vector, not a batch-mate's"
+            );
+        }
+        assert!(
+            h.calls().len() < 8,
+            "8 simultaneous requests should merge into fewer model calls, got {}",
+            h.calls().len()
+        );
+        assert_eq!(h.metric("embed_batch_jobs_total").await, 8);
+        assert!(h.metric("embed_batch_runs_total").await >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn all_cache_hits_skip_the_batch_window() {
+        let mut c = cfg();
+        c.batch_window_ms = 300;
+        let h = start(c).await;
+        assert_eq!(h.post(r#"{"input":["abc"]}"#).await.0, 200);
+        assert_eq!(h.calls().len(), 1);
+        let t0 = Instant::now();
+        let r = h.post(r#"{"input":["abc"]}"#).await;
+        assert_eq!(r.0, 200);
+        assert!(
+            t0.elapsed() < Duration::from_millis(200),
+            "a fully cached request must not wait out the 300 ms batch window: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(h.calls().len(), 1, "the repeat must not reach the model");
     }
 
     #[tokio::test(flavor = "multi_thread")]

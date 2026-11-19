@@ -15,6 +15,12 @@ pub struct Metrics {
     pub rate_limited: AtomicU64,
     pub cache_hits: AtomicU64,
     pub cache_misses: AtomicU64,
+    /// Merged runs executed by the dynamic batcher (leader runs).
+    pub batch_runs: AtomicU64,
+    /// Jobs served by merged runs.
+    pub batch_jobs: AtomicU64,
+    /// Unique texts in merged runs.
+    pub batch_texts: AtomicU64,
 }
 
 impl Metrics {
@@ -118,6 +124,24 @@ impl Metrics {
             "texts needing inference",
             "counter",
             self.cache_misses.load(Relaxed),
+        );
+        line(
+            "embed_batch_runs_total",
+            "merged inference runs produced by dynamic batching",
+            "counter",
+            self.batch_runs.load(Relaxed),
+        );
+        line(
+            "embed_batch_jobs_total",
+            "requests served by merged runs",
+            "counter",
+            self.batch_jobs.load(Relaxed),
+        );
+        line(
+            "embed_batch_texts_total",
+            "unique texts in merged runs",
+            "counter",
+            self.batch_texts.load(Relaxed),
         );
         line(
             "embed_healthy",

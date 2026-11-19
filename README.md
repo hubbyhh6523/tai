@@ -23,7 +23,7 @@ cargo run --release                  # 默认只监听 127.0.0.1:8090
 python3 scripts/smoke.py             # 冒烟测试，需要服务已在运行
 ```
 
-`cargo test` 不需要模型：共 42 个测试，其中 13 个在本地回环上启动真实的 HTTP 服务、用假模型验证鉴权、参数校验、缓存、限流、截断统计和健康检查。首次构建会从网络下载 ONNX Runtime（`ort` 的 `download-binaries`）。
+- `cargo test` 不需要模型：共 54 个测试，其中 15 个在本地回环上启动真实的 HTTP 服务、用假模型验证鉴权、参数校验、缓存、限流、截断统计、跨请求合批和健康检查。首次构建会从网络下载 ONNX Runtime（`ort` 的 `download-binaries`）。
 
 CI 里还有一个 `smoke` 任务：下载模型（按 `fetch-model.sh` 的内容缓存，每次都重新校验 SHA-256），用真实模型启动发布版二进制，运行 `scripts/ci-smoke.sh`：冒烟测试一次，缓存淘汰和 TTL 测试各一次，三次使用不同的服务配置。
 
@@ -42,6 +42,9 @@ CI 里还有一个 `smoke` 任务：下载模型（按 `fetch-model.sh` 的内�
 | `MAX_CHARS` | 5000 | 单条文本超过该字符数会被截断，截断数计入 `usage.truncated` 和 `embed_truncated_texts_total` |
 | `MAX_TOKENS` | 512 | 分词后的最大长度 |
 | `MAX_TOKENS_PER_RUN` | 8192 | 单次 ONNX 推理的填充后位置数预算（条数 × 块内最长）；一批按 token 长度排序后按此预算切块 |
+| `BATCH_WINDOW_MS` | 0 | 跨请求合批等待窗口（毫秒）；窗口内同时到的请求会拼成一批推理，单请求最多多等一个窗口，0 表示关闭合批（默认关闭，高并发场景自行设 5–10 ms） |
+| `BATCH_MAX_TEXTS` | 32 | 一个合并批最多包含的文本条数，达到即提前刷出，不等窗口走完 |
+| `BATCH_MAX_REQUESTS` | 8 | 一个合并批最多包含的请求数，达到即提前刷出 |
 | `MAX_BODY_MB` | 4 | 请求体大小上限（MB），0 表示不限制，超限返回 413 |
 | `RATE_LIMIT_PER_MIN` | 0 | 每分钟 embedding 请求上限，0 表示关闭，超限返回 429 |
 | `API_KEY` | 空 | 非空时启用 Bearer 鉴权；`BIND_ADDR=0.0.0.0` 且未设时启动会打印警告 |
@@ -61,6 +64,8 @@ CI 里还有一个 `smoke` 任务：下载模型（按 `fetch-model.sh` 的内�
 
 大批量推理时先按 token 长度排序，再按填充后位置数（条数 × 块内最长）以 `MAX_TOKENS_PER_RUN` 为预算切块分别跑 ONNX、最后按原顺序还原，避免一条长文本把整批都垫到最长长度。向量语义不变（CLS 池化 + L2 归一化）。
 
+跨请求合批：短时间内同时到的不同请求会拼成一批再推理（`BATCH_WINDOW_MS`，默认关闭，0 ms；高并发场景可设 5–10 ms），均摊每次 ONNX 调用的固定开销；全缓存命中的请求不等窗口直接返回，单条已满 `BATCH_MAX_TEXTS` 的请求也不等窗口。合并批仍走上面的切块逻辑、仍受会话池并发上限约束；合并失败时各请求会单独重试，健康的请求不受同批坏请求拖累。相关指标：`embed_batch_runs_total`、`embed_batch_jobs_total`、`embed_batch_texts_total`。
+
 重点关注这几个指标：`embed_responses_server_error_total`（调用方拿不到向量的次数）、`embed_inference_errors_total`、`embed_cache_hits_total` 与 `embed_cache_misses_total`、`embed_cache_evictions_total`、`embed_truncated_texts_total`、`embed_rate_limited_total`，以及 `embed_healthy`（为 0 即服务不可用）。
 
 ## 部署
@@ -79,7 +84,7 @@ CI 里还有一个 `smoke` 任务：下载模型（按 `fetch-model.sh` 的内�
 ## 目录
 
 ```
-src/        服务代码（main、embedder、cache、metrics、health）
+src/        服务代码（main、embedder、batcher、cache、metrics、health）
 deploy/     docker-compose、网关配置、模型下载与 admin 初始化脚本
 scripts/    冒烟测试、缓存策略测试、压测脚本
 ```
