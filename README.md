@@ -33,7 +33,9 @@ CI 里还有一个 `smoke` 任务：下载模型（按 `fetch-model.sh` 的内�
 |---|---|---|
 | `PORT` | 8090 | 监听端口 |
 | `BIND_ADDR` | `127.0.0.1` | 监听地址；容器内需用 `0.0.0.0`（Dockerfile / compose 已设置），宿主机端口仍只绑回环 |
-| `MODEL_DIR` | `model` | 需要包含 `model.onnx` 和 `tokenizer.json` |
+| `MODEL_DIR` | `model` | 需要包含 `model.onnx` 和 `tokenizer.json`；量化版另需 `model_quantized.onnx`（`deploy/fetch-model.sh` 会一并下载并校验 SHA-256） |
+| `MODEL_FILE` | `model.onnx` | `MODEL_DIR` 内的 ONNX 文件名；显式设置时优先于 `MODEL_QUANTIZED` |
+| `MODEL_QUANTIZED` | `false` | `true` 时加载 `model_quantized.onnx`（Xenova 官方 int8 量化，约 24 MB）；默认 fp32。量化会轻微改变向量值，见“模型量化”一节 |
 | `MODEL_NAME` | `bge-small-zh-v1.5` | 响应里的 `model` 字段 |
 | `DIM` | 512 | 模型输出维度，请求中的 `dimensions` 必须与之一致 |
 | `THREADS` | 按核数推导 | 未设置时按 `可用核数 / 会话池大小` 推导，不再默认 2 会话 × 4 线程超配 4 核机 |
@@ -66,6 +68,12 @@ CI 里还有一个 `smoke` 任务：下载模型（按 `fetch-model.sh` 的内�
 
 跨请求合批：短时间内同时到的不同请求会拼成一批再推理（`BATCH_WINDOW_MS`，默认关闭，0 ms；高并发场景可设 5–10 ms），均摊每次 ONNX 调用的固定开销；全缓存命中的请求不等窗口直接返回，单条已满 `BATCH_MAX_TEXTS` 的请求也不等窗口。合并批仍走上面的切块逻辑、仍受会话池并发上限约束；合并失败时各请求会单独重试，健康的请求不受同批坏请求拖累。相关指标：`embed_batch_runs_total`、`embed_batch_jobs_total`、`embed_batch_texts_total`。
 
+## 模型量化（opt-in，默认关闭）
+
+设 `MODEL_QUANTIZED=true` 时加载 `model_quantized.onnx`（Xenova 官方 int8 量化模型，与 fp32 同一仓库、同一 pinned revision，约 24 MB，只有 fp32 的约 1/4；`deploy/fetch-model.sh` 会下载并校验 SHA-256）。`MODEL_FILE` 可显式指定 `MODEL_DIR` 内的任意 ONNX 文件名，优先于 `MODEL_QUANTIZED`。
+
+量化会轻微改变向量值（实测见 `OPTIMIZATION_REPORT.md` §9）：同一文本 fp32 与 int8 向量的余弦相似度约 0.999x，语义排序（相似 > 无关）仍成立，但向量不再逐位相同。**开启量化后旧向量表应重建**：fp32 下存的向量与 int8 新算的向量混用会引入系统性偏差，检索时要么全量重算，要么保持 fp32。长文本推理是量化的主要收益场景，短文本和缓存命中基本不受影响。默认保持 fp32 不变。
+
 重点关注这几个指标：`embed_responses_server_error_total`（调用方拿不到向量的次数）、`embed_inference_errors_total`、`embed_cache_hits_total` 与 `embed_cache_misses_total`、`embed_cache_evictions_total`、`embed_truncated_texts_total`、`embed_rate_limited_total`，以及 `embed_healthy`（为 0 即服务不可用）。
 
 ## 部署
@@ -75,7 +83,7 @@ CI 里还有一个 `smoke` 任务：下载模型（按 `fetch-model.sh` 的内�
 ## 已知限制
 
 - 推理用 ONNX 会话池（默认按核数推导，见上表），不是单把互斥锁。在一台 4 vCPU 的沙箱里、缓存未命中时原版吞吐约 190 条/秒（合成负载测量值，不代表你的真实流量；优化版未实测，需用 `scripts/bench.sh` / `load.py` 验证）。
-- `ort` 固定在预发布版 `2.0.0-rc.15`，升级时接口可能变化。
+- `ort` 固定在 `2.0.0-rc.15`：2026-11-19 核查时 crates.io 上没有更新的稳定版（`max_stable_version` 为空，最新发布仍是 rc.15，2.0.0 正式版未发布），因此没有可升的版本；代码已使用 rc.14+ 的 `Environment` API 和 ONNX Runtime 1.31.0。构建时 `ort-sys` 仍会尝试从 pyke CDN 下载预编译包，该 CDN 在本机返回 403，详见 `OPTIMIZATION_REPORT.md` §9 和 §7 的绕法。
 - Dockerfile 和 `docker compose` 流程尚未在容器里实际验证（编写环境没有 Docker），详见 `deploy/README.md` 的验证状态表。
 - `/health` 返回 503 的路径在 HTTP 层测试里用假模型触发过，没有用真实模型触发过。
 - CI 会用 `cargo clippy -- -D warnings` 强制不允许新的 clippy 警告，并检查 `cargo fmt --check`。

@@ -31,6 +31,10 @@ struct Config {
     port: u16,
     bind_addr: String,
     model_dir: PathBuf,
+    /// ONNX file inside `model_dir` (default `model.onnx`).
+    /// `MODEL_QUANTIZED=1` selects `model_quantized.onnx` unless `MODEL_FILE`
+    /// is set explicitly; fp32 stays the default.
+    model_file: String,
     model_name: String,
     dim: usize,
     threads: usize,
@@ -114,6 +118,11 @@ impl Config {
             port: env_or("PORT", 8090),
             bind_addr: env_or("BIND_ADDR", "127.0.0.1".to_string()),
             model_dir: env_or("MODEL_DIR", PathBuf::from("model")),
+            model_file: match std::env::var("MODEL_FILE") {
+                Ok(v) if !v.trim().is_empty() => v,
+                _ if env_bool("MODEL_QUANTIZED", false) => "model_quantized.onnx".to_string(),
+                _ => "model.onnx".to_string(),
+            },
             model_name: env_or("MODEL_NAME", "bge-small-zh-v1.5".to_string()),
             dim: env_or("DIM", 512),
             threads,
@@ -569,6 +578,7 @@ async fn main() -> anyhow::Result<()> {
         (cfg.queue_timeout_ms > 0).then(|| std::time::Duration::from_millis(cfg.queue_timeout_ms));
     let embedder = Arc::new(Embedder::load(
         &cfg.model_dir,
+        &cfg.model_file,
         cfg.pool_size,
         cfg.threads,
         queue_timeout,
@@ -582,7 +592,8 @@ async fn main() -> anyhow::Result<()> {
         .self_check(cfg.max_tokens)
         .context("startup self-check failed")?;
     eprintln!(
-        "self-check ok: dim={} max_tokens={} max_tokens_per_run={} pool_size={} threads_per_session={} cpus={} queue_timeout_ms={} batch_window_ms={} batch_max_texts={} batch_max_requests={} bind={} in {} ms",
+        "self-check ok: model_file={} dim={} max_tokens={} max_tokens_per_run={} pool_size={} threads_per_session={} cpus={} queue_timeout_ms={} batch_window_ms={} batch_max_texts={} batch_max_requests={} bind={} in {} ms",
+        cfg.model_file,
         cfg.dim,
         cfg.max_tokens,
         cfg.max_tokens_per_run,
@@ -711,6 +722,7 @@ mod tests {
             port: 0,
             bind_addr: "127.0.0.1".into(),
             model_dir: PathBuf::from("unused"),
+            model_file: "model.onnx".into(),
             model_name: "fake-model".into(),
             dim: 4,
             threads: 1,

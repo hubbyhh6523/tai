@@ -29,3 +29,7 @@ fetch() { # <remote path> <local name> <expected sha256>
 
 fetch tokenizer.json tokenizer.json "$TOKENIZER_SHA256"
 fetch onnx/model.onnx model.onnx "$MODEL_SHA256"
+# Optional int8-quantized model (same Xenova repo/revision, 23.9 MB):
+# MODEL_QUANTIZED=1 selects it. SHA-256 verified 2026-11-19.
+MODEL_QUANTIZED_SHA256="15b717c382bcb518ba457b93ea6850ede7f4f1cd8937454aa06972366cd19bcc"
+fetch onnx/model_quantized.onnx model_quantized.onnx "$MODEL_QUANTIZED_SHA256"

@@ -89,6 +89,7 @@ impl Embedder {
     #[allow(clippy::too_many_arguments)]
     pub fn load(
         model_dir: &Path,
+        model_file: &str,
         pool_size: usize,
         threads_per_session: usize,
         queue_timeout: Option<Duration>,
@@ -113,15 +114,16 @@ impl Embedder {
         }));
 
         let env = ort::init().with_name("embed-svc").build().map_err(oe)?;
+        let model_path = model_dir.join(model_file);
         let pool = SessionPool::new(
             &env,
-            &model_dir.join("model.onnx"),
+            &model_path,
             pool_size,
             threads_per_session,
             queue_timeout,
         )
         .map_err(oe)
-        .context("load model.onnx")?;
+        .with_context(|| format!("load {}", model_path.display()))?;
 
         let probe = pool.acquire().map_err(oe)?;
         let session = probe.session().map_err(oe)?;
