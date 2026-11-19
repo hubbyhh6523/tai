@@ -13,11 +13,14 @@ RUN if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
  && cargo build --release
 
 FROM debian:trixie-slim
+# huggingface.co is unreachable from some networks (CN sandboxes); pass
+# --build-arg HF_ENDPOINT=https://hf-mirror.com to fetch via the mirror.
+ARG HF_ENDPOINT=https://huggingface.co
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/embed-svc /usr/local/bin/embed-svc
 COPY deploy/fetch-model.sh /usr/local/bin/fetch-model.sh
 RUN chmod +x /usr/local/bin/fetch-model.sh \
-    && /usr/local/bin/fetch-model.sh /model \
+    && HF_ENDPOINT="$HF_ENDPOINT" /usr/local/bin/fetch-model.sh /model \
     && rm /usr/local/bin/fetch-model.sh
 ENV PORT=8090 MODEL_DIR=/model MODEL_NAME=bge-small-zh-v1.5 DIM=512 THREADS=4
 # Inside a container the service must bind 0.0.0.0 for Docker port mapping

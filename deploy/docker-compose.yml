@@ -21,6 +21,11 @@ services:
       # and API_KEY is required, so this is not a public exposure.
       BIND_ADDR: "0.0.0.0"
       MODEL_DIR: /model
+      # MODEL_QUANTIZED=true loads model_quantized.onnx (Xenova int8, ~24 MB);
+      # MODEL_FILE overrides with an explicit filename — leave it empty when
+      # MODEL_QUANTIZED is set, an explicit MODEL_FILE wins over MODEL_QUANTIZED.
+      MODEL_QUANTIZED: ${MODEL_QUANTIZED:-false}
+      MODEL_FILE: ${MODEL_FILE:-}
       MODEL_NAME: bge-small-zh-v1.5
       DIM: "512"
       THREADS: ${EMBED_THREADS:-4}
