@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ort::environment::Environment;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::{Session, builder::GraphOptimizationLevel};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -52,7 +52,10 @@ impl SessionPool {
         queue_timeout: Option<Duration>,
     ) -> Result<Self> {
         anyhow::ensure!(pool_size > 0, "session pool size must be greater than zero");
-        anyhow::ensure!(threads_per_session > 0, "threads per session must be greater than zero");
+        anyhow::ensure!(
+            threads_per_session > 0,
+            "threads per session must be greater than zero"
+        );
         let mut slots = Vec::with_capacity(pool_size);
         for i in 0..pool_size {
             let session = Session::builder(env)
@@ -77,7 +80,11 @@ impl SessionPool {
     }
 
     pub fn acquire(&self) -> Result<PooledSession> {
-        let mut idle = self.inner.idle.lock().map_err(|_| anyhow!("session pool lock poisoned"))?;
+        let mut idle = self
+            .inner
+            .idle
+            .lock()
+            .map_err(|_| anyhow!("session pool lock poisoned"))?;
         let start = Instant::now();
         let index = loop {
             if let Some(index) = idle.pop_front() {
@@ -85,20 +92,30 @@ impl SessionPool {
             }
             idle = match self.inner.queue_timeout {
                 Some(timeout) => {
-                    let remaining = timeout.checked_sub(start.elapsed())
+                    let remaining = timeout
+                        .checked_sub(start.elapsed())
                         .ok_or_else(|| anyhow!("timed out waiting for an embedding session"))?;
-                    let (guard, result) = self.inner.available.wait_timeout(idle, remaining)
+                    let (guard, result) = self
+                        .inner
+                        .available
+                        .wait_timeout(idle, remaining)
                         .map_err(|_| anyhow!("session pool lock poisoned"))?;
                     if result.timed_out() && guard.is_empty() {
                         return Err(anyhow!("timed out waiting for an embedding session"));
                     }
                     guard
                 }
-                None => self.inner.available.wait(idle)
+                None => self
+                    .inner
+                    .available
+                    .wait(idle)
                     .map_err(|_| anyhow!("session pool lock poisoned"))?,
             };
         };
-        Ok(PooledSession { pool: self.inner.clone(), index })
+        Ok(PooledSession {
+            pool: self.inner.clone(),
+            index,
+        })
     }
 
     pub fn session_poisoned(&self) -> bool {
@@ -129,19 +146,26 @@ mod tests {
 mod regression {
     use super::*;
     use std::collections::HashSet;
-    use std::sync::{mpsc, Barrier};
+    use std::sync::{Barrier, mpsc};
     use std::thread;
     const WAIT: Duration = Duration::from_secs(5);
     fn pool(n: usize, timeout: Duration) -> Arc<SessionPool> {
-        Arc::new(SessionPool { inner: Arc::new(PoolInner {
-            slots: vec![], idle: Mutex::new((0..n).collect()),
-            available: Condvar::new(), queue_timeout: Some(timeout),
-        }) })
+        Arc::new(SessionPool {
+            inner: Arc::new(PoolInner {
+                slots: vec![],
+                idle: Mutex::new((0..n).collect()),
+                available: Condvar::new(),
+                queue_timeout: Some(timeout),
+            }),
+        })
     }
     fn returned(p: &SessionPool, n: usize) {
         let idle = p.inner.idle.lock().unwrap();
         assert_eq!(idle.len(), n);
-        assert_eq!(idle.iter().copied().collect::<HashSet<_>>(), (0..n).collect());
+        assert_eq!(
+            idle.iter().copied().collect::<HashSet<_>>(),
+            (0..n).collect()
+        );
     }
     #[test]
     fn empty_pool_times_out() {
@@ -223,27 +247,29 @@ mod regression {
         let p = pool(SIZE, WAIT);
         let start = Arc::new(Barrier::new(WORKERS));
         let active = Arc::new(Mutex::new(HashSet::new()));
-        let workers: Vec<_> = (0..WORKERS).map(|_| {
-            let p = Arc::clone(&p);
-            let start = Arc::clone(&start);
-            let active = Arc::clone(&active);
-            thread::spawn(move || {
-                start.wait();
-                for _ in 0..100 {
-                    let guard = p.acquire().unwrap();
-                    let index = guard.index;
-                    {
-                        let mut active = active.lock().unwrap();
-                        assert!(index < SIZE);
-                        assert!(active.insert(index), "slot {index} borrowed twice");
-                        assert!(active.len() <= SIZE);
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let p = Arc::clone(&p);
+                let start = Arc::clone(&start);
+                let active = Arc::clone(&active);
+                thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..100 {
+                        let guard = p.acquire().unwrap();
+                        let index = guard.index;
+                        {
+                            let mut active = active.lock().unwrap();
+                            assert!(index < SIZE);
+                            assert!(active.insert(index), "slot {index} borrowed twice");
+                            assert!(active.len() <= SIZE);
+                        }
+                        thread::yield_now();
+                        assert!(active.lock().unwrap().remove(&index));
+                        drop(guard);
                     }
-                    thread::yield_now();
-                    assert!(active.lock().unwrap().remove(&index));
-                    drop(guard);
-                }
+                })
             })
-        }).collect();
+            .collect();
         let results: Vec<_> = workers.into_iter().map(|w| w.join()).collect();
         assert!(results.iter().all(|r| r.is_ok()));
         assert!(active.lock().unwrap().is_empty());

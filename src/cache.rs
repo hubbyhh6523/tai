@@ -1,8 +1,8 @@
 use lru::LruCache;
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering::Relaxed},
     },
     time::{Duration, Instant},
 };
@@ -63,8 +63,20 @@ fn cost(e: &Entry) -> usize {
 impl EmbedCache {
     pub fn new(max_bytes: usize, max_entries: usize, ttl: Option<Duration>) -> Self {
         let on = max_bytes > 0 && max_entries > 0;
-        let inner = on.then(|| Mutex::new(Inner { map: LruCache::unbounded(), bytes: 0 }));
-        Self { inner, max_bytes, max_entries, ttl, evictions: AtomicU64::new(0), expired: AtomicU64::new(0) }
+        let inner = on.then(|| {
+            Mutex::new(Inner {
+                map: LruCache::unbounded(),
+                bytes: 0,
+            })
+        });
+        Self {
+            inner,
+            max_bytes,
+            max_entries,
+            ttl,
+            evictions: AtomicU64::new(0),
+            expired: AtomicU64::new(0),
+        }
     }
 
     pub fn get(&self, text: &str) -> Option<Entry> {
@@ -83,7 +95,9 @@ impl EmbedCache {
     }
 
     pub fn put(&self, text: &str, e: Entry) {
-        let Some(Ok(mut g)) = self.inner.as_ref().map(|m| m.lock()) else { return };
+        let Some(Ok(mut g)) = self.inner.as_ref().map(|m| m.lock()) else {
+            return;
+        };
         let c = cost(&e);
         if c > self.max_bytes {
             return; // a single entry larger than the whole budget is never admitted
@@ -92,7 +106,14 @@ impl EmbedCache {
         if let Some(old) = g.map.pop(&key) {
             g.bytes -= old.bytes;
         }
-        g.map.put(key, Slot { entry: e, bytes: c, at: Instant::now() });
+        g.map.put(
+            key,
+            Slot {
+                entry: e,
+                bytes: c,
+                at: Instant::now(),
+            },
+        );
         g.bytes += c;
         while g.bytes > self.max_bytes || g.map.len() > self.max_entries {
             match g.map.pop_lru() {
@@ -115,8 +136,16 @@ impl EmbedCache {
         CacheStats {
             entries,
             bytes,
-            max_bytes: if self.inner.is_some() { self.max_bytes } else { 0 },
-            max_entries: if self.inner.is_some() { self.max_entries } else { 0 },
+            max_bytes: if self.inner.is_some() {
+                self.max_bytes
+            } else {
+                0
+            },
+            max_entries: if self.inner.is_some() {
+                self.max_entries
+            } else {
+                0
+            },
             evictions: self.evictions.load(Relaxed),
             expired: self.expired.load(Relaxed),
         }
@@ -128,7 +157,10 @@ mod tests {
     use super::*;
 
     fn e(dim: usize) -> Entry {
-        Entry { vec: Arc::new(vec![0.5; dim]), tokens: 1 }
+        Entry {
+            vec: Arc::new(vec![0.5; dim]),
+            tokens: 1,
+        }
     }
     fn one() -> usize {
         cost(&e(10))

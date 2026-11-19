@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install stable Rust (edition 2024 needs 1.85 or newer)
-        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
       - uses: actions/cache@v4
         with:
           path: |
@@ -25,6 +25,8 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
       - name: Unit tests (no model needed)
         run: cargo test --locked
+      - name: Format check
+        run: cargo fmt --all -- --check
       - name: Clippy (warnings fail the build)
         run: cargo clippy --locked --all-targets -- -D warnings
 
