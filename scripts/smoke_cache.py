@@ -12,7 +12,11 @@ def post(texts):
     with urllib.request.urlopen(r, timeout=30) as x: return json.load(x)
 
 def metrics():
-    with urllib.request.urlopen(BASE + "/metrics", timeout=10) as x:
+    h = {}
+    if KEY:
+        h["Authorization"] = f"Bearer {KEY}"
+    req = urllib.request.Request(BASE + "/metrics", headers=h)
+    with urllib.request.urlopen(req, timeout=10) as x:
         return {l.split()[0]: int(l.split()[1]) for l in x.read().decode().splitlines() if l and not l.startswith("#")}
 
 ok = True

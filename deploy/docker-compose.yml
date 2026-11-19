@@ -16,12 +16,22 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8090"
+      # Inside a container the service must bind 0.0.0.0 for Docker's port
+      # mapping to reach it; the host side is loopback-only (see ports below)
+      # and API_KEY is required, so this is not a public exposure.
+      BIND_ADDR: "0.0.0.0"
       MODEL_DIR: /model
       MODEL_NAME: bge-small-zh-v1.5
       DIM: "512"
       THREADS: ${EMBED_THREADS:-4}
       MAX_BATCH: "256"
       MAX_CHARS: "5000"
+      MAX_TOKENS_PER_RUN: ${MAX_TOKENS_PER_RUN:-8192}
+      MAX_BODY_MB: ${MAX_BODY_MB:-4}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-0}
+      # Set to "true" to make the process exit (and restart via
+      # restart: unless-stopped) as soon as /health goes 503.
+      HEALTH_EXIT_ON_UNHEALTHY: ${HEALTH_EXIT_ON_UNHEALTHY:-false}
       API_KEY: ${EMBED_API_KEY:?set EMBED_API_KEY in .env}
       CACHE_MAX_MB: ${CACHE_MAX_MB:-64}
       CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-200000}

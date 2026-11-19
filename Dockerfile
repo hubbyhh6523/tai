@@ -20,6 +20,9 @@ RUN chmod +x /usr/local/bin/fetch-model.sh \
     && /usr/local/bin/fetch-model.sh /model \
     && rm /usr/local/bin/fetch-model.sh
 ENV PORT=8090 MODEL_DIR=/model MODEL_NAME=bge-small-zh-v1.5 DIM=512 THREADS=4
+# Inside a container the service must bind 0.0.0.0 for Docker port mapping
+# to reach it; publish the port loopback-only on the host (see compose).
+ENV BIND_ADDR=0.0.0.0
 EXPOSE 8090
 HEALTHCHECK CMD ["bash","-c","exec 3<>/dev/tcp/127.0.0.1/${PORT} && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q 200 <&3"]
 CMD ["embed-svc"]

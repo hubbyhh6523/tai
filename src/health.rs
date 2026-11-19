@@ -9,7 +9,10 @@ pub struct Health {
 impl Health {
     /// `max_failures == 0` disables the failure-count check (a poisoned lock is still reported).
     pub fn new(max_failures: u64) -> Self {
-        Self { consecutive_failures: AtomicU64::new(0), max_failures }
+        Self {
+            consecutive_failures: AtomicU64::new(0),
+            max_failures,
+        }
     }
 
     pub fn record(&self, ok: bool) {
@@ -28,7 +31,9 @@ impl Health {
     /// `poisoned` means the model session lock was poisoned by a panic during inference.
     pub fn check(&self, poisoned: bool) -> Result<(), String> {
         if poisoned {
-            return Err("model session lock poisoned by an earlier panic; restart the service".into());
+            return Err(
+                "model session lock poisoned by an earlier panic; restart the service".into(),
+            );
         }
         let n = self.consecutive_failures();
         if self.max_failures > 0 && n >= self.max_failures {
@@ -54,7 +59,10 @@ mod tests {
         h.record(false);
         assert!(h.check(false).is_ok());
         h.record(false);
-        assert_eq!(h.check(false).unwrap_err(), "3 consecutive inference failures");
+        assert_eq!(
+            h.check(false).unwrap_err(),
+            "3 consecutive inference failures"
+        );
     }
 
     #[test]

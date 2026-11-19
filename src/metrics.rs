@@ -11,6 +11,8 @@ pub struct Metrics {
     pub inference_batches: AtomicU64,
     pub inference_ms: AtomicU64,
     pub texts: AtomicU64,
+    pub truncated_texts: AtomicU64,
+    pub rate_limited: AtomicU64,
     pub cache_hits: AtomicU64,
     pub cache_misses: AtomicU64,
 }
@@ -27,30 +29,144 @@ impl Metrics {
     }
 
     /// Prometheus text exposition format.
-    pub fn render(&self, c: &crate::cache::CacheStats, healthy: bool, consecutive_failures: u64) -> String {
+    pub fn render(
+        &self,
+        c: &crate::cache::CacheStats,
+        healthy: bool,
+        consecutive_failures: u64,
+    ) -> String {
         let mut s = String::new();
         let mut line = |name: &str, help: &str, kind: &str, v: u64| {
-            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {v}\n"));
+            s.push_str(&format!(
+                "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {v}\n"
+            ));
         };
-        line("embed_requests_total", "HTTP requests to the embeddings endpoint", "counter", self.requests.load(Relaxed));
-        line("embed_responses_ok_total", "2xx responses", "counter", self.ok.load(Relaxed));
-        line("embed_responses_unauthorized_total", "401 responses", "counter", self.unauthorized.load(Relaxed));
-        line("embed_responses_client_error_total", "other 4xx responses", "counter", self.client_errors.load(Relaxed));
-        line("embed_responses_server_error_total", "5xx responses; the caller loses vectors on these", "counter", self.server_errors.load(Relaxed));
-        line("embed_inference_errors_total", "failed model inference calls", "counter", self.inference_errors.load(Relaxed));
-        line("embed_inference_batches_total", "model inference calls", "counter", self.inference_batches.load(Relaxed));
-        line("embed_inference_milliseconds_total", "time spent in model inference", "counter", self.inference_ms.load(Relaxed));
-        line("embed_texts_total", "texts received", "counter", self.texts.load(Relaxed));
-        line("embed_cache_hits_total", "texts served from cache", "counter", self.cache_hits.load(Relaxed));
-        line("embed_cache_misses_total", "texts needing inference", "counter", self.cache_misses.load(Relaxed));
-        line("embed_healthy", "1 when the model is serving normally, 0 otherwise", "gauge", u64::from(healthy));
-        line("embed_consecutive_inference_failures", "inference failures since the last success", "gauge", consecutive_failures);
-        line("embed_cache_entries", "entries currently cached", "gauge", c.entries as u64);
-        line("embed_cache_bytes", "estimated bytes held by the cache", "gauge", c.bytes as u64);
-        line("embed_cache_max_bytes", "cache byte budget (0 = disabled)", "gauge", c.max_bytes as u64);
-        line("embed_cache_max_entries", "cache entry cap (0 = disabled)", "gauge", c.max_entries as u64);
-        line("embed_cache_evictions_total", "entries evicted to stay within budget", "counter", c.evictions);
-        line("embed_cache_expired_total", "entries dropped because their TTL elapsed", "counter", c.expired);
+        line(
+            "embed_requests_total",
+            "HTTP requests to the embeddings endpoint",
+            "counter",
+            self.requests.load(Relaxed),
+        );
+        line(
+            "embed_responses_ok_total",
+            "2xx responses",
+            "counter",
+            self.ok.load(Relaxed),
+        );
+        line(
+            "embed_responses_unauthorized_total",
+            "401 responses",
+            "counter",
+            self.unauthorized.load(Relaxed),
+        );
+        line(
+            "embed_responses_client_error_total",
+            "other 4xx responses",
+            "counter",
+            self.client_errors.load(Relaxed),
+        );
+        line(
+            "embed_responses_server_error_total",
+            "5xx responses; the caller loses vectors on these",
+            "counter",
+            self.server_errors.load(Relaxed),
+        );
+        line(
+            "embed_inference_errors_total",
+            "failed model inference calls",
+            "counter",
+            self.inference_errors.load(Relaxed),
+        );
+        line(
+            "embed_inference_batches_total",
+            "model inference calls",
+            "counter",
+            self.inference_batches.load(Relaxed),
+        );
+        line(
+            "embed_inference_milliseconds_total",
+            "time spent in model inference",
+            "counter",
+            self.inference_ms.load(Relaxed),
+        );
+        line(
+            "embed_texts_total",
+            "texts received",
+            "counter",
+            self.texts.load(Relaxed),
+        );
+        line(
+            "embed_truncated_texts_total",
+            "texts shortened by MAX_CHARS before inference",
+            "counter",
+            self.truncated_texts.load(Relaxed),
+        );
+        line(
+            "embed_rate_limited_total",
+            "embedding requests rejected with 429",
+            "counter",
+            self.rate_limited.load(Relaxed),
+        );
+        line(
+            "embed_cache_hits_total",
+            "texts served from cache",
+            "counter",
+            self.cache_hits.load(Relaxed),
+        );
+        line(
+            "embed_cache_misses_total",
+            "texts needing inference",
+            "counter",
+            self.cache_misses.load(Relaxed),
+        );
+        line(
+            "embed_healthy",
+            "1 when the model is serving normally, 0 otherwise",
+            "gauge",
+            u64::from(healthy),
+        );
+        line(
+            "embed_consecutive_inference_failures",
+            "inference failures since the last success",
+            "gauge",
+            consecutive_failures,
+        );
+        line(
+            "embed_cache_entries",
+            "entries currently cached",
+            "gauge",
+            c.entries as u64,
+        );
+        line(
+            "embed_cache_bytes",
+            "estimated bytes held by the cache",
+            "gauge",
+            c.bytes as u64,
+        );
+        line(
+            "embed_cache_max_bytes",
+            "cache byte budget (0 = disabled)",
+            "gauge",
+            c.max_bytes as u64,
+        );
+        line(
+            "embed_cache_max_entries",
+            "cache entry cap (0 = disabled)",
+            "gauge",
+            c.max_entries as u64,
+        );
+        line(
+            "embed_cache_evictions_total",
+            "entries evicted to stay within budget",
+            "counter",
+            c.evictions,
+        );
+        line(
+            "embed_cache_expired_total",
+            "entries dropped because their TTL elapsed",
+            "counter",
+            c.expired,
+        );
         s
     }
 }
@@ -75,7 +191,14 @@ mod tests {
     fn render_contains_series() {
         let m = Metrics::default();
         m.cache_hits.fetch_add(3, Relaxed);
-        let st = crate::cache::CacheStats { entries: 2, bytes: 4096, max_bytes: 8192, max_entries: 10, evictions: 5, expired: 1 };
+        let st = crate::cache::CacheStats {
+            entries: 2,
+            bytes: 4096,
+            max_bytes: 8192,
+            max_entries: 10,
+            evictions: 5,
+            expired: 1,
+        };
         let out = m.render(&st, true, 2);
         assert!(out.contains("embed_cache_hits_total 3"));
         assert!(out.contains("embed_cache_entries 2"));
