@@ -27,6 +27,9 @@ services:
       MAX_BATCH: "256"
       MAX_CHARS: "5000"
       MAX_TOKENS_PER_RUN: ${MAX_TOKENS_PER_RUN:-8192}
+      BATCH_WINDOW_MS: ${BATCH_WINDOW_MS:-0}
+      BATCH_MAX_TEXTS: ${BATCH_MAX_TEXTS:-32}
+      BATCH_MAX_REQUESTS: ${BATCH_MAX_REQUESTS:-8}
       MAX_BODY_MB: ${MAX_BODY_MB:-4}
       RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-0}
       # Set to "true" to make the process exit (and restart via
